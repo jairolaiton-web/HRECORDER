@@ -708,6 +708,69 @@ body {
         btnFlotante.disabled = true;
     }
 
+    /* === VISTA PREVIA EN EL VISUALIZADOR (conexión local con la ventana que abrió el grabador) === */
+    let pcVista = null;
+    let sesionVista = '';
+
+    function esperarIce(pc) {
+        return new Promise(function (ok) {
+            if (pc.iceGatheringState === 'complete') { ok(); return; }
+            const t = setTimeout(ok, 2500);
+            pc.addEventListener('icegatheringstatechange', function () {
+                if (pc.iceGatheringState === 'complete') { clearTimeout(t); ok(); }
+            });
+        });
+    }
+
+    function cerrarVistaPrevia(avisar) {
+        if (pcVista) { try { pcVista.close(); } catch (e) {} pcVista = null; }
+        if (avisar && window.opener && !window.opener.closed) {
+            try { window.opener.postMessage({ habi: 'fin' }, '*'); } catch (e) {}
+        }
+    }
+
+    async function enviarVistaPrevia(forzar) {
+        try {
+            if (!window.opener || window.opener.closed) return;
+            if (!screenStream || !screenStream.active) return;
+            const vivo = pcVista && ['new', 'connecting', 'connected'].includes(pcVista.connectionState);
+            if (vivo && !forzar) return;
+            cerrarVistaPrevia(false);
+            const pc = new RTCPeerConnection({ iceServers: [] });
+            pcVista = pc;
+            const vt = screenStream.getVideoTracks()[0];
+            pc.addTrack(vt, new MediaStream([vt]));
+            await pc.setLocalDescription(await pc.createOffer());
+            await esperarIce(pc);
+            let superficie = '';
+            try { superficie = vt.getSettings().displaySurface || ''; } catch (e) {}
+            window.opener.postMessage({ habi: 'oferta', sdp: pc.localDescription.sdp, superficie: superficie }, '*');
+        } catch (e) {
+            console.error('No se pudo enviar la vista previa:', e);
+        }
+    }
+
+    // Si el visualizador se recarga pierde la referencia a esta ventana: se presenta de nuevo para reconectar la vista
+    setInterval(function () {
+        try {
+            if (!window.opener || window.opener.closed) return;
+            if (!screenStream || !screenStream.active) return;
+            window.opener.postMessage({ habi: 'hola' }, '*');
+        } catch (e) {}
+    }, 2000);
+
+    window.addEventListener('message', async (ev) => {
+        const d = ev.data;
+        if (!d || !d.habi || ev.source !== window.opener) return;
+        if (d.habi === 'solicitar') {
+            const nueva = d.sesion !== sesionVista;
+            sesionVista = d.sesion;
+            enviarVistaPrevia(nueva);
+        } else if (d.habi === 'respuesta' && pcVista && pcVista.signalingState === 'have-local-offer') {
+            try { await pcVista.setRemoteDescription({ type: 'answer', sdp: d.sdp }); } catch (e) { console.error(e); }
+        }
+    });
+
     async function prepararPermisos() {
         try {
             if (!micStream || !micStream.active) {
@@ -719,7 +782,9 @@ body {
                 });
             }
 
+            let pantallaNueva = false;
             if (!screenStream || !screenStream.active) {
+                pantallaNueva = true;
                 screenStream = await navigator.mediaDevices.getDisplayMedia({ 
                     video: true, 
                     audio: {
@@ -735,6 +800,7 @@ body {
                 }
 
                 screenStream.getVideoTracks()[0].onended = () => {
+                    cerrarVistaPrevia(true);
                     detenerGrabacionManual();
                     detenerRecorridoGeneralCompleto();
                     detenerVideoCompleto();
@@ -772,6 +838,7 @@ body {
 
             btnPermisos.innerText = "✅ Permisos Conectados";
             btnPermisos.classList.add('listo');
+            enviarVistaPrevia(pantallaNueva);
             return true;
         } catch (err) {
             console.error("Error al obtener permisos:", err);
